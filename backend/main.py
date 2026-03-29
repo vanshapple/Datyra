@@ -1,8 +1,7 @@
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import hashlib, os, tempfile
+import hashlib, os, tempfile, time, json
 from PIL import Image
 import pytesseract
 import pdf2image
@@ -15,7 +14,14 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 app = FastAPI(title="Datyra API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 def extract_text(contents: bytes, filename: str) -> str:
     ext = filename.lower().split(".")[-1]
@@ -67,7 +73,6 @@ Document: {text[:2000]}"""
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
-    import json
     try:
         return json.loads(response.content[0].text.strip())
     except:
@@ -83,22 +88,14 @@ async def upload_document(file: UploadFile = File(...)):
     contents = await file.read()
     doc_hash = hashlib.sha256(contents).hexdigest()
 
-    # Upload to Supabase Storage
-    import time
     storage_path = f"documents/{doc_hash}_{int(time.time())}/{file.filename}"
     supabase.storage.from_("documents").upload(storage_path, contents)
     storage_url = f"{os.getenv('SUPABASE_URL')}/storage/v1/object/public/documents/{storage_path}"
 
-    # OCR
     extracted_text = extract_text(contents, file.filename)
-
-    # AI Classification
     doc_type = classify_document(extracted_text)
-
-    # AI Insights extraction
     insights = extract_insights(extracted_text, doc_type)
 
-    # Save to database
     doc_record = supabase.table("documents").insert({
         "filename": file.filename,
         "file_type": ext,
@@ -133,9 +130,7 @@ async def get_documents():
 async def health():
     return {"status": "ok", "supabase": "connected", "ai": "ready"}
 
-# Blockchain verification
 from web3 import Web3
-import json
 
 w3 = Web3(Web3.HTTPProvider(os.getenv("BLOCKCHAIN_RPC")))
 CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
