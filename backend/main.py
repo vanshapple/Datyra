@@ -15,7 +15,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 app = FastAPI(title="Datyra API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 def extract_text(contents: bytes, filename: str) -> str:
     ext = filename.lower().split(".")[-1]
