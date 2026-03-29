@@ -78,7 +78,9 @@ Document: {text[:2000]}"""
         messages=[{"role": "user", "content": prompt}]
     )
     try:
-        return json.loads(response.content[0].text.strip())
+        raw = response.content[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(raw)
     except:
         return {"summary": response.content[0].text.strip()}
 
