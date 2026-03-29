@@ -17,7 +17,7 @@ export default function Home() {
     const formData = new FormData()
     formData.append('file', file)
     try {
-      const res = await fetch('http://localhost:8000/upload', {
+      const res = await fetch('https://datyra-production.up.railway.app/upload', {
         method: 'POST',
         body: formData
       })
