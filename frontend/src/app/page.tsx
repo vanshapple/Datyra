@@ -17,7 +17,7 @@ export default function Home() {
     const formData = new FormData()
     formData.append('file', file)
     try {
-      const res = await fetch('https://datyra-production.up.railway.app/upload', {
+      const res = await fetch('/api/upload', {
         method: 'POST',
         body: formData
       })
