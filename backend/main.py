@@ -92,7 +92,10 @@ async def upload_document(file: UploadFile = File(...)):
     supabase.storage.from_("documents").upload(storage_path, contents)
     storage_url = f"{os.getenv('SUPABASE_URL')}/storage/v1/object/public/documents/{storage_path}"
 
-    extracted_text = extract_text(contents, file.filename)
+    try:
+        extracted_text = extract_text(contents, file.filename)
+    except Exception:
+        extracted_text = f"Document: {file.filename}"
     doc_type = classify_document(extracted_text)
     insights = extract_insights(extracted_text, doc_type)
 
