@@ -30,8 +30,12 @@ def extract_text(contents: bytes, filename: str) -> str:
         tmp_path = tmp.name
     try:
         if ext == "pdf":
-            pages = pdf2image.convert_from_path(tmp_path)
-            text = "\n".join(pytesseract.image_to_string(p) for p in pages)
+            import pdfplumber
+            with pdfplumber.open(tmp_path) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            if not text.strip():
+                pages = pdf2image.convert_from_path(tmp_path)
+                text = "\n".join(pytesseract.image_to_string(p) for p in pages)
         else:
             img = Image.open(tmp_path)
             text = pytesseract.image_to_string(img)
