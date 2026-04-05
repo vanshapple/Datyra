@@ -488,12 +488,12 @@ export default function Home() {
             </div>
 
             {/* ── RAG Chat Panel ── */}
-            {result.doc_id && result.rag_chunks > 0 && (
+            {result.doc_id && (
               <div className="chat-panel">
                 <div className="chat-header">
                   <div className="chat-dot" />
                   <span className="chat-title">Chat with this Document</span>
-                  <span className="chat-sub">{result.rag_chunks} chunks indexed</span>
+                  <span className="chat-sub">powered by Pinecone + Claude</span>
                 </div>
                 <div className="chat-messages">
                   {chatMessages.length === 0 && (

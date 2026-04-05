@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -302,7 +302,7 @@ Give a clear, concise answer. For medical documents, always suggest consulting a
 # ─────────────────────────────────────────────
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...), user_id: str = Form(None)):
+async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), user_id: str = Form(None)):
     allowed = ["pdf", "png", "jpg", "jpeg"]
     ext = file.filename.lower().split(".")[-1]
     if ext not in allowed:
@@ -339,13 +339,9 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(None
         "extracted_json": insights
     }).execute()
 
-    # ── Embed document text into Pinecone for RAG chat ──
-    chunk_count = 0
-    try:
-        if extracted_text and len(extracted_text.split()) > 20:
-            chunk_count = embed_and_store(doc_id, extracted_text)
-    except Exception as e:
-        print(f"RAG embedding failed (non-fatal): {e}")
+    # ── Embed document text into Pinecone in background (non-blocking) ──
+    if extracted_text and len(extracted_text.split()) > 20:
+        background_tasks.add_task(embed_and_store, doc_id, extracted_text)
 
     # ── Drug interaction check for MEDICAL documents ──
     drug_interaction_result = None
@@ -373,7 +369,6 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(None
         "storage_url": storage_url,
         "insights": insights,
         "text_preview": extracted_text[:300],
-        "rag_chunks": chunk_count,
     }
     if drug_interaction_result:
         response_payload["drug_interactions"] = drug_interaction_result
