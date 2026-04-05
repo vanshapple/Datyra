@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import hashlib, os, tempfile, time, json
+import hashlib, os, tempfile, time, json, httpx
+from itertools import combinations
 from PIL import Image
 import pytesseract
 import pdf2image
@@ -23,6 +24,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─────────────────────────────────────────────
+# OCR
+# ─────────────────────────────────────────────
+
 def extract_text(contents: bytes, filename: str) -> str:
     ext = filename.lower().split(".")[-1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
@@ -42,6 +47,10 @@ def extract_text(contents: bytes, filename: str) -> str:
     finally:
         os.unlink(tmp_path)
     return text.strip()
+
+# ─────────────────────────────────────────────
+# AI
+# ─────────────────────────────────────────────
 
 def classify_document(text: str) -> str:
     response = claude.messages.create(
@@ -84,6 +93,127 @@ Document: {text[:2000]}"""
     except:
         return {"summary": response.content[0].text.strip()}
 
+# ─────────────────────────────────────────────
+# Drug Interaction Checker (OpenFDA)
+# ─────────────────────────────────────────────
+
+OPENFDA_URL = "https://api.fda.gov/drug/label.json"
+
+def normalize_medicine_name(name: str) -> str:
+    """Strip dosage info like '500mg', 'tablet', etc. to get a clean drug name."""
+    import re
+    name = re.sub(r'\b\d+\s*(mg|mcg|ml|g|iu|units?)\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(tablet|capsule|syrup|injection|cream|gel|drops?|solution|suspension)\b', '', name, flags=re.IGNORECASE)
+    return name.strip().lower()
+
+def fetch_drug_warnings(medicine: str) -> dict | None:
+    """
+    Call OpenFDA drug label API for a single medicine.
+    Returns relevant warning fields or None if not found.
+    """
+    name = normalize_medicine_name(medicine)
+    if not name:
+        return None
+    try:
+        resp = httpx.get(
+            OPENFDA_URL,
+            params={"search": f'openfda.generic_name:"{name}" OR openfda.brand_name:"{name}"', "limit": 1},
+            timeout=8.0
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return None
+        label = results[0]
+        return {
+            "medicine": medicine,
+            "warnings": label.get("warnings", []),
+            "drug_interactions": label.get("drug_interactions", []),
+            "contraindications": label.get("contraindications", []),
+            "adverse_reactions": label.get("adverse_reactions", []),
+        }
+    except Exception:
+        return None
+
+def check_drug_interactions(medicines: list[str]) -> dict:
+    """
+    For each medicine, fetch warnings from OpenFDA.
+    For each pair, flag if both appear in each other's drug_interactions text.
+    Returns structured result with per-drug warnings and pairwise interaction flags.
+    """
+    if not medicines:
+        return {"medicines": [], "individual_warnings": [], "pairwise_interactions": [], "checked": False}
+
+    # Cap at 10 medicines to avoid timeout on Railway free tier
+    medicines = medicines[:10]
+
+    individual_warnings = []
+    drug_data: dict[str, dict] = {}
+
+    for med in medicines:
+        result = fetch_drug_warnings(med)
+        if result:
+            drug_data[med] = result
+            # Summarise the most useful warning fields
+            warning_texts = (
+                result["warnings"][:1] +
+                result["drug_interactions"][:1] +
+                result["contraindications"][:1]
+            )
+            # OpenFDA returns long strings; truncate each to 300 chars
+            clean = [w[:300] for w in warning_texts if isinstance(w, str) and w.strip()]
+            if clean:
+                individual_warnings.append({
+                    "medicine": med,
+                    "warnings": clean,
+                    "severity": classify_warning_severity(clean)
+                })
+
+    # Pairwise interaction check
+    pairwise_interactions = []
+    for med_a, med_b in combinations(medicines, 2):
+        interaction_notes = []
+        # Check if med_b appears in med_a's drug_interactions text
+        if med_a in drug_data:
+            for text in drug_data[med_a].get("drug_interactions", []):
+                if normalize_medicine_name(med_b) in text.lower():
+                    interaction_notes.append(f"{med_a} label warns about {med_b}: {text[:200]}")
+        # Check if med_a appears in med_b's drug_interactions text
+        if med_b in drug_data:
+            for text in drug_data[med_b].get("drug_interactions", []):
+                if normalize_medicine_name(med_a) in text.lower():
+                    interaction_notes.append(f"{med_b} label warns about {med_a}: {text[:200]}")
+
+        if interaction_notes:
+            pairwise_interactions.append({
+                "pair": [med_a, med_b],
+                "notes": interaction_notes,
+                "severity": "HIGH"
+            })
+
+    return {
+        "medicines": medicines,
+        "individual_warnings": individual_warnings,
+        "pairwise_interactions": pairwise_interactions,
+        "checked": True,
+        "source": "OpenFDA"
+    }
+
+def classify_warning_severity(warnings: list[str]) -> str:
+    """Simple keyword-based severity triage."""
+    combined = " ".join(warnings).lower()
+    if any(w in combined for w in ["death", "fatal", "life-threatening", "black box", "contraindicated"]):
+        return "HIGH"
+    if any(w in combined for w in ["avoid", "caution", "monitor", "serious", "severe"]):
+        return "MEDIUM"
+    return "LOW"
+
+# ─────────────────────────────────────────────
+# Routes
+# ─────────────────────────────────────────────
+
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     allowed = ["pdf", "png", "jpg", "jpeg"]
@@ -102,6 +232,7 @@ async def upload_document(file: UploadFile = File(...)):
         extracted_text = extract_text(contents, file.filename)
     except Exception:
         extracted_text = f"Document: {file.filename}"
+
     doc_type = classify_document(extracted_text)
     insights = extract_insights(extracted_text, doc_type)
 
@@ -121,23 +252,61 @@ async def upload_document(file: UploadFile = File(...)):
         "extracted_json": insights
     }).execute()
 
-    return {
+    # ── Drug interaction check for MEDICAL documents ──
+    drug_interaction_result = None
+    if doc_type == "MEDICAL":
+        medicines = insights.get("medicines", [])
+        if medicines:
+            drug_interaction_result = check_drug_interactions(medicines)
+            supabase.table("drug_interactions").insert({
+                "doc_id": doc_id,
+                "medicines": drug_interaction_result["medicines"],
+                "warnings": [
+                    w["medicine"] + ": " + "; ".join(w["warnings"])
+                    for w in drug_interaction_result["individual_warnings"]
+                ] + [
+                    f"INTERACTION — {p['pair'][0]} + {p['pair'][1]}: " + "; ".join(p["notes"])
+                    for p in drug_interaction_result["pairwise_interactions"]
+                ]
+            }).execute()
+
+    response_payload = {
         "filename": file.filename,
         "hash": doc_hash,
         "doc_type": doc_type,
         "storage_url": storage_url,
         "insights": insights,
-        "text_preview": extracted_text[:300]
+        "text_preview": extracted_text[:300],
     }
+    if drug_interaction_result:
+        response_payload["drug_interactions"] = drug_interaction_result
+
+    return response_payload
+
 
 @app.get("/documents")
 async def get_documents():
-    result = supabase.table("documents").select("*, insights(*)").execute()
+    result = supabase.table("documents").select("*, insights(*), drug_interactions(*)").execute()
     return result.data
+
+
+@app.get("/interactions/{doc_id}")
+async def get_interactions(doc_id: str):
+    """Fetch saved drug interaction results for a document."""
+    result = supabase.table("drug_interactions").select("*").eq("doc_id", doc_id).execute()
+    if not result.data:
+        raise HTTPException(404, "No drug interaction data found for this document")
+    return result.data[0]
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "supabase": "connected", "ai": "ready"}
+
+
+# ─────────────────────────────────────────────
+# Blockchain
+# ─────────────────────────────────────────────
 
 from web3 import Web3
 
