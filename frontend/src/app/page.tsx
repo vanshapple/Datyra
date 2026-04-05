@@ -426,6 +426,11 @@ export default function Home() {
                 <span className="spinner-sm" />
               ) : user ? (
                 <>
+                  <a href="/documents" style={{ padding: '8px 14px', background: 'transparent', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '20px', color: '#a09fad', fontFamily: 'DM Mono, monospace', fontSize: '11px', textDecoration: 'none', transition: 'all 0.2s', whiteSpace: 'nowrap' }}
+                    onMouseOver={e => { (e.target as any).style.borderColor='rgba(99,102,241,0.3)'; (e.target as any).style.color='#6366f1' }}
+                    onMouseOut={e => { (e.target as any).style.borderColor='rgba(255,255,255,0.08)'; (e.target as any).style.color='#a09fad' }}>
+                    My Docs
+                  </a>
                   <div className="user-chip">
                     <div className="user-avatar">{user.email?.[0]?.toUpperCase()}</div>
                     <span className="user-email">{user.email}</span>
