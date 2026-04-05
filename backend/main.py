@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form , HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import hashlib, os, tempfile, time, json, httpx
@@ -215,7 +215,7 @@ def classify_warning_severity(warnings: list[str]) -> str:
 # ─────────────────────────────────────────────
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), user_id: str = Form(None)):
     allowed = ["pdf", "png", "jpg", "jpeg"]
     ext = file.filename.lower().split(".")[-1]
     if ext not in allowed:
@@ -242,6 +242,7 @@ async def upload_document(file: UploadFile = File(...)):
         "doc_type": doc_type,
         "hash": doc_hash,
         "storage_url": storage_url
+        "user id": user_id
     }).execute()
 
     doc_id = doc_record.data[0]["id"]
