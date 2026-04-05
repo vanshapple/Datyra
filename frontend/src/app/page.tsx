@@ -158,6 +158,8 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<{role: 'user'|'assistant', text: string}[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
+  const [emailSending, setEmailSending] = useState(false)
+  const [emailSent, setEmailSent] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -180,6 +182,24 @@ export default function Home() {
     setFile(null)
     setVerifyResult(null)
     setChatMessages([])
+    setEmailSent(false)
+  }
+
+  const handleSendReport = async () => {
+    if (!result?.doc_id || !user?.email || emailSending) return
+    setEmailSending(true)
+    try {
+      const res = await fetch(`https://datyra-production.up.railway.app/send-report/${result.doc_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user.email })
+      })
+      const data = await res.json()
+      if (data.sent) setEmailSent(true)
+    } catch {
+      // fail silently — button resets
+    }
+    setEmailSending(false)
   }
 
   const handleChat = async () => {
@@ -213,6 +233,7 @@ export default function Home() {
     setError('')
     setResult(null)
     setVerifyResult(null)
+    setEmailSent(false)
     const formData = new FormData()
     formData.append('file', file)
     formData.append('user_id', user.id)
@@ -378,6 +399,10 @@ export default function Home() {
         .badge-medium { background: rgba(255,190,50,0.15); color: #FFBE32; border: 1px solid rgba(255,190,50,0.3); }
         .badge-low { background: rgba(29,158,117,0.15); color: #1D9E75; border: 1px solid rgba(29,158,117,0.3); }
         .interaction-note { font-family: 'DM Mono', monospace; font-size: 11px; color: #a09fad; line-height: 1.6; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-top: 8px; }
+        .email-btn { display:flex;align-items:center;gap:8px;padding:11px 20px;background:transparent;border:1px solid rgba(99,102,241,0.3);border-radius:10px;color:#6366f1;font-family:'DM Mono',monospace;font-size:12px;font-weight:500;cursor:pointer;transition:all 0.2s;width:100%; }
+        .email-btn:hover:not(:disabled) { background:rgba(99,102,241,0.08);border-color:rgba(99,102,241,0.5); }
+        .email-btn:disabled { opacity:0.5;cursor:not-allowed; }
+        .email-btn.sent { border-color:rgba(29,158,117,0.4);color:#1D9E75;background:rgba(29,158,117,0.06);cursor:default; }
       `}</style>
 
       <div className="noise" />
@@ -475,6 +500,20 @@ export default function Home() {
                 <span>{cfg.icon}</span> {cfg.label}
               </div>
             </div>
+
+            {/* ── Send Report Email Button ── */}
+            <button
+              className={`email-btn${emailSent ? ' sent' : ''}`}
+              onClick={handleSendReport}
+              disabled={emailSending || emailSent}
+            >
+              {emailSent
+                ? <><span>✓</span> Report sent to {user?.email}</>
+                : emailSending
+                  ? <><span className="spinner-sm" /> Sending report...</>
+                  : <><span>✉</span> Send Report to {user?.email}</>
+              }
+            </button>
 
             <div className="stats-row">
               <div className="stat-card">

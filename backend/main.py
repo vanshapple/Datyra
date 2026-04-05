@@ -525,18 +525,6 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
                 ]
             }).execute()
 
-    # ── Email notifications (background, non-blocking) ──
-    if user_id:
-        user_record = supabase.auth.admin.get_user_by_id(user_id)
-        user_email = user_record.user.email if user_record and user_record.user else None
-        if user_email:
-            background_tasks.add_task(send_upload_email, user_email, file.filename, doc_type, insights)
-            if drug_interaction_result and (
-                drug_interaction_result.get("pairwise_interactions") or
-                drug_interaction_result.get("individual_warnings")
-            ):
-                background_tasks.add_task(send_drug_interaction_email, user_email, file.filename, drug_interaction_result)
-
     response_payload = {
         "doc_id": doc_id,
         "filename": file.filename,
@@ -565,6 +553,47 @@ async def get_interactions(doc_id: str):
     if not result.data:
         raise HTTPException(404, "No drug interaction data found for this document")
     return result.data[0]
+
+
+class SendReportRequest(BaseModel):
+    email: str
+
+@app.post("/send-report/{doc_id}")
+async def send_report(doc_id: str, body: SendReportRequest):
+    """Send analysis report to user's email on demand."""
+    if not body.email:
+        raise HTTPException(400, "Email is required")
+
+    # Fetch document
+    doc_record = supabase.table("documents").select("*").eq("id", doc_id).execute()
+    if not doc_record.data:
+        raise HTTPException(404, "Document not found")
+    doc = doc_record.data[0]
+
+    # Fetch insights
+    insights_record = supabase.table("insights").select("*").eq("doc_id", doc_id).execute()
+    insights = insights_record.data[0].get("extracted_json", {}) if insights_record.data else {}
+
+    # Fetch drug interactions if MEDICAL
+    drug_result = None
+    if doc["doc_type"] == "MEDICAL":
+        di_record = supabase.table("drug_interactions").select("*").eq("doc_id", doc_id).execute()
+        if di_record.data:
+            medicines = di_record.data[0].get("medicines", [])
+            warnings = di_record.data[0].get("warnings", [])
+            # Reconstruct a minimal drug_result dict for the email function
+            drug_result = {
+                "medicines": medicines,
+                "individual_warnings": [{"medicine": w.split(":")[0], "warnings": [w], "severity": "MEDIUM"} for w in warnings if "INTERACTION" not in w],
+                "pairwise_interactions": []
+            }
+
+    # Send emails
+    send_upload_email(body.email, doc["filename"], doc["doc_type"], insights)
+    if drug_result and drug_result["individual_warnings"]:
+        send_drug_interaction_email(body.email, doc["filename"], drug_result)
+
+    return {"sent": True, "email": body.email}
 
 
 @app.post("/chat/{doc_id}")
