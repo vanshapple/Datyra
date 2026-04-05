@@ -500,9 +500,11 @@ export default function Home() {
                     <div className="chat-empty">Ask anything about this document...</div>
                   )}
                   {chatMessages.map((msg, i) => (
-                    <div key={i} className={msg.role === 'user' ? 'msg-user' : 'msg-assistant'}>
-                      {msg.text}
-                    </div>
+                    msg.text ? (
+                      <div key={i} className={msg.role === 'user' ? 'msg-user' : 'msg-assistant'}>
+                        {msg.text}
+                      </div>
+                    ) : null
                   ))}
                   {chatLoading && (
                     <div className="msg-assistant" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

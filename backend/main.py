@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTa
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import hashlib, os, tempfile, time, json, httpx
+import hashlib, os, tempfile, time, json, httpx, asyncio
 from itertools import combinations
 from PIL import Image
 import pytesseract
@@ -303,6 +303,9 @@ Give a clear, concise answer. For medical documents, always suggest consulting a
     )
     return response.content[0].text.strip()
 
+class ChatRequest(BaseModel):
+    question: str
+
 # ─────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────
@@ -396,9 +399,6 @@ async def get_interactions(doc_id: str):
     return result.data[0]
 
 
-class ChatRequest(BaseModel):
-    question: str
-
 @app.post("/chat/{doc_id}")
 async def chat_with_document(doc_id: str, body: ChatRequest):
     """RAG chat: embed question → retrieve chunks → Claude answers."""
@@ -406,17 +406,29 @@ async def chat_with_document(doc_id: str, body: ChatRequest):
     if not question:
         raise HTTPException(400, "Question cannot be empty")
 
-    # Fetch doc_type from Supabase for context-aware prompting
+    if not PINECONE_AVAILABLE:
+        raise HTTPException(503, "RAG service unavailable")
+
     doc_record = supabase.table("documents").select("doc_type").eq("id", doc_id).execute()
     doc_type = doc_record.data[0]["doc_type"] if doc_record.data else "GENERAL"
 
-    try:
-        chunks = query_document(doc_id, question)
-    except Exception as e:
-        raise HTTPException(500, f"Vector search failed: {e}")
+    # Retry up to 3 times with 2s delay — background embedding may still be in progress
+    chunks = []
+    for attempt in range(3):
+        try:
+            chunks = query_document(doc_id, question)
+        except Exception as e:
+            raise HTTPException(500, f"Vector search failed: {e}")
+        if chunks:
+            break
+        if attempt < 2:
+            await asyncio.sleep(2)
 
     if not chunks:
-        return {"answer": "I couldn't find relevant information in this document to answer your question.", "chunks_used": 0}
+        return {
+            "answer": "The document is still being indexed — please wait a few seconds and try again.",
+            "chunks_used": 0
+        }
 
     answer = answer_with_rag(question, chunks, doc_type)
     return {"answer": answer, "chunks_used": len(chunks)}
