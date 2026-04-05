@@ -7,18 +7,21 @@ export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 55000)
-    
+    const timeout = setTimeout(() => controller.abort(), 58000)
+
     const response = await fetch('https://datyra-production.up.railway.app/upload', {
       method: 'POST',
       body: formData,
       signal: controller.signal,
     })
     clearTimeout(timeout)
-    
+
     const data = await response.json()
     return NextResponse.json(data)
   } catch (error: any) {
+    if (error.name === 'AbortError') {
+      return NextResponse.json({ error: 'Request timed out. Try a smaller file.' }, { status: 504 })
+    }
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }

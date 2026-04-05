@@ -9,3 +9,7 @@ pdf2image
 Pillow
 web3
 pdfplumber
+httpx
+pinecone
+# v2
+    

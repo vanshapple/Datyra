@@ -15,8 +15,16 @@ load_dotenv()
 from supabase import create_client
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-pinecone_index = pc.Index(os.getenv("PINECONE_INDEX", "datyra-docs"))
+
+try:
+    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    pinecone_index = pc.Index(os.getenv("PINECONE_INDEX", "datyra-docs"))
+    PINECONE_AVAILABLE = True
+except Exception as e:
+    print(f"Pinecone init failed (RAG disabled): {e}")
+    pc = None
+    pinecone_index = None
+    PINECONE_AVAILABLE = False
 
 app = FastAPI(title="Datyra API")
 
@@ -56,46 +64,49 @@ def extract_text(contents: bytes, filename: str) -> str:
 # AI
 # ─────────────────────────────────────────────
 
-def classify_document(text: str) -> str:
+def classify_and_extract(text: str) -> tuple[str, dict]:
+    """
+    Single Claude call that both classifies the document AND extracts insights.
+    Replaces the two separate classify_document + extract_insights calls.
+    """
+    prompt = f"""Analyze this document and return ONLY valid JSON with no markdown fences.
+
+The JSON must have this exact structure:
+{{
+  "doc_type": "MEDICAL" | "LEGAL" | "FINANCIAL",
+  "summary": "2-3 sentence summary",
+  "key_points": ["point1", "point2", "point3"],
+  "important_dates": [],
+  "parties_involved": [],
+  "medicines": [],
+  "patient": "name or unknown"
+}}
+
+Rules:
+- doc_type must be exactly one of: MEDICAL, LEGAL, FINANCIAL
+- For MEDICAL docs, populate medicines[] with any drug/medicine names found
+- For non-MEDICAL docs, medicines can be empty []
+- key_points should have 2-5 items
+- Return ONLY the JSON object, no other text
+
+Document:
+{text[:2500]}"""
+
     response = claude.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=10,
-        messages=[{"role": "user", "content": f"Classify this document as exactly one word - MEDICAL, LEGAL, or FINANCIAL. Document:\n{text[:1000]}"}]
-    )
-    result = response.content[0].text.strip().upper()
-    if result not in ["MEDICAL", "LEGAL", "FINANCIAL"]:
-        result = "FINANCIAL"
-    return result
-
-def extract_insights(text: str, doc_type: str) -> dict:
-    if doc_type == "MEDICAL":
-        prompt = f"""Extract from this medical document:
-1. List of medicines/drugs mentioned (as JSON array)
-2. Patient details if any
-3. Key health information
-
-Return ONLY valid JSON like:
-{{"medicines": ["medicine1", "medicine2"], "patient": "name or unknown", "summary": "brief summary"}}
-
-Document: {text[:2000]}"""
-    else:
-        prompt = f"""Extract key information from this {doc_type} document.
-Return ONLY valid JSON like:
-{{"summary": "2-3 sentence summary", "key_points": ["point1", "point2", "point3"], "important_dates": [], "parties_involved": []}}
-
-Document: {text[:2000]}"""
-
-    response = claude.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}]
     )
     try:
         raw = response.content[0].text.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
-    except:
-        return {"summary": response.content[0].text.strip()}
+        data = json.loads(raw)
+        doc_type = data.get("doc_type", "FINANCIAL").upper()
+        if doc_type not in ["MEDICAL", "LEGAL", "FINANCIAL"]:
+            doc_type = "FINANCIAL"
+        return doc_type, data
+    except Exception:
+        return "FINANCIAL", {"summary": response.content[0].text.strip()}
 
 # ─────────────────────────────────────────────
 # Drug Interaction Checker (OpenFDA)
@@ -235,21 +246,16 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 def embed_and_store(doc_id: str, text: str) -> int:
-    """
-    Chunk the document text, embed via Pinecone hosted inference,
-    and upsert into the index under namespace = doc_id.
-    Returns number of chunks stored.
-    """
+    if not PINECONE_AVAILABLE:
+        return 0
     chunks = chunk_text(text)
     if not chunks:
         return 0
-
     embeddings = pc.inference.embed(
         model=EMBED_MODEL,
         inputs=chunks,
         parameters={"input_type": "passage", "truncate": "END"}
     )
-
     vectors = [
         {
             "id": f"{doc_id}_chunk_{i}",
@@ -258,12 +264,12 @@ def embed_and_store(doc_id: str, text: str) -> int:
         }
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
     ]
-
     pinecone_index.upsert(vectors=vectors, namespace=doc_id)
     return len(vectors)
 
 def query_document(doc_id: str, question: str, top_k: int = 5) -> list[str]:
-    """Embed the question and retrieve top_k relevant chunks from this doc's namespace."""
+    if not PINECONE_AVAILABLE:
+        return []
     q_embed = pc.inference.embed(
         model=EMBED_MODEL,
         inputs=[question],
@@ -320,8 +326,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     except Exception:
         extracted_text = f"Document: {file.filename}"
 
-    doc_type = classify_document(extracted_text)
-    insights = extract_insights(extracted_text, doc_type)
+    doc_type, insights = classify_and_extract(extracted_text)
 
     doc_record = supabase.table("documents").insert({
         "filename": file.filename,
