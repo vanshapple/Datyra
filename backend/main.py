@@ -307,8 +307,164 @@ class ChatRequest(BaseModel):
     question: str
 
 # ─────────────────────────────────────────────
-# Routes
+# Email Notifications — Resend
 # ─────────────────────────────────────────────
+
+RESEND_API_URL = "https://api.resend.com/emails"
+FROM_EMAIL = "onboarding@resend.dev"
+
+def send_upload_email(to_email: str, filename: str, doc_type: str, insights: dict):
+    """Send a document analysis summary email via Resend."""
+    type_emoji = {"MEDICAL": "🩺", "LEGAL": "⚖️", "FINANCIAL": "💰"}.get(doc_type, "📄")
+    summary = insights.get("summary", "No summary available.")
+    key_points = insights.get("key_points", [])
+    medicines = insights.get("medicines", [])
+
+    points_html = "".join(f"<li style='margin:6px 0;color:#c4c2cc;'>{p}</li>" for p in key_points[:5])
+    medicines_html = "".join(
+        f"<span style='display:inline-block;padding:3px 10px;margin:3px;border-radius:20px;background:rgba(255,107,107,0.15);color:#FF6B6B;border:1px solid rgba(255,107,107,0.3);font-size:12px;'>{m}</span>"
+        for m in medicines
+    ) if medicines else ""
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#0a0a0f;font-family:'Segoe UI',sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:40px 24px;">
+
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:32px;">
+      <div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:inline-flex;align-items:center;justify-content:center;font-size:20px;">⬡</div>
+      <span style="font-size:24px;font-weight:800;color:#e8e6e0;margin-left:10px;">Datyra</span>
+    </div>
+
+    <div style="background:#0f0f17;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:11px;color:#6b6a75;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 8px;">Document Analyzed</p>
+      <h2 style="margin:0 0 4px;font-size:18px;color:#e8e6e0;">{filename}</h2>
+      <span style="display:inline-block;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-family:monospace;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);">
+        {type_emoji} {doc_type}
+      </span>
+    </div>
+
+    <div style="background:#0f0f17;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:10px;color:#6b6a75;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 10px;">AI Summary</p>
+      <p style="font-size:14px;color:#c4c2cc;line-height:1.7;margin:0;">{summary}</p>
+    </div>
+
+    {"" if not key_points else f'''
+    <div style="background:#0f0f17;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:10px;color:#6b6a75;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 10px;">Key Points</p>
+      <ul style="margin:0;padding-left:0;list-style:none;">{points_html}</ul>
+    </div>'''}
+
+    {"" if not medicines else f'''
+    <div style="background:#0f0f17;border:1px solid rgba(255,107,107,0.15);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:10px;color:#FF6B6B;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 10px;">Medicines Detected</p>
+      <div>{medicines_html}</div>
+    </div>'''}
+
+    <p style="font-size:11px;color:#3d3c47;font-family:monospace;text-align:center;margin-top:32px;">
+      Datyra — AI Document Intelligence · <a href="https://datyra.vercel.app" style="color:#6366f1;text-decoration:none;">datyra.vercel.app</a>
+    </p>
+  </div>
+</body>
+</html>"""
+
+    try:
+        httpx.post(
+            RESEND_API_URL,
+            headers={"Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}", "Content-Type": "application/json"},
+            json={"from": FROM_EMAIL, "to": [to_email], "subject": f"📄 Datyra — {filename} analyzed ({doc_type})", "html": html},
+            timeout=10.0
+        )
+    except Exception as e:
+        print(f"Upload email failed (non-fatal): {e}")
+
+
+def send_drug_interaction_email(to_email: str, filename: str, drug_result: dict):
+    """Send a drug interaction warning email via Resend."""
+    medicines = drug_result.get("medicines", [])
+    pairwise = drug_result.get("pairwise_interactions", [])
+    individual = drug_result.get("individual_warnings", [])
+
+    if not pairwise and not individual:
+        return  # No warnings to send
+
+    severity_colors = {"HIGH": "#FF6B6B", "MEDIUM": "#FFBE32", "LOW": "#1D9E75"}
+
+    interactions_html = ""
+    for p in pairwise:
+        color = severity_colors.get(p["severity"], "#FF6B6B")
+        note = p["notes"][0][:200] if p["notes"] else ""
+        interactions_html += f"""
+        <div style="background:rgba(255,107,107,0.06);border:1px solid rgba(255,107,107,0.2);border-radius:10px;padding:14px 18px;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="font-size:13px;font-weight:700;color:#e8e6e0;">{p['pair'][0]} + {p['pair'][1]}</span>
+            <span style="padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;font-family:monospace;background:rgba(255,107,107,0.15);color:{color};border:1px solid {color}40;">{p['severity']}</span>
+          </div>
+          <p style="font-family:monospace;font-size:11px;color:#a09fad;margin:0;line-height:1.6;">{note}</p>
+        </div>"""
+
+    for w in individual:
+        color = severity_colors.get(w["severity"], "#FFBE32")
+        warn = w["warnings"][0][:200] if w["warnings"] else ""
+        interactions_html += f"""
+        <div style="background:rgba(255,190,50,0.06);border:1px solid rgba(255,190,50,0.2);border-radius:10px;padding:14px 18px;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="font-size:13px;font-weight:700;color:#e8e6e0;">{w['medicine']}</span>
+            <span style="padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;font-family:monospace;background:rgba(255,190,50,0.15);color:{color};border:1px solid {color}40;">{w['severity']}</span>
+          </div>
+          <p style="font-family:monospace;font-size:11px;color:#a09fad;margin:0;line-height:1.6;">{warn}</p>
+        </div>"""
+
+    meds_list = ", ".join(medicines)
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#0a0a0f;font-family:'Segoe UI',sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:40px 24px;">
+
+    <div style="margin-bottom:32px;">
+      <span style="font-size:24px;font-weight:800;color:#e8e6e0;">⬡ Datyra</span>
+    </div>
+
+    <div style="background:#0f0f17;border:1px solid rgba(255,107,107,0.3);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:10px;color:#FF6B6B;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 8px;">⚠ Drug Interaction Warning</p>
+      <h2 style="margin:0 0 8px;font-size:18px;color:#e8e6e0;">{filename}</h2>
+      <p style="font-size:13px;color:#6b6a75;font-family:monospace;margin:0;">Medicines detected: {meds_list}</p>
+    </div>
+
+    <div style="background:#0f0f17;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:28px;margin-bottom:16px;">
+      <p style="font-family:monospace;font-size:10px;color:#6b6a75;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 14px;">Interaction Analysis</p>
+      {interactions_html}
+    </div>
+
+    <div style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.2);border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+      <p style="font-size:12px;color:#a09fad;margin:0;line-height:1.6;">
+        ⚕ This analysis is based on OpenFDA data and is for informational purposes only.
+        Always consult a qualified healthcare professional before making any medical decisions.
+      </p>
+    </div>
+
+    <p style="font-size:11px;color:#3d3c47;font-family:monospace;text-align:center;margin-top:32px;">
+      Datyra — AI Document Intelligence · <a href="https://datyra.vercel.app" style="color:#6366f1;text-decoration:none;">datyra.vercel.app</a>
+    </p>
+  </div>
+</body>
+</html>"""
+
+    try:
+        httpx.post(
+            RESEND_API_URL,
+            headers={"Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}", "Content-Type": "application/json"},
+            json={"from": FROM_EMAIL, "to": [to_email], "subject": f"⚠ Datyra — Drug interaction warning for {filename}", "html": html},
+            timeout=10.0
+        )
+    except Exception as e:
+        print(f"Drug interaction email failed (non-fatal): {e}")
+
+
 
 @app.post("/upload")
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), user_id: str = Form(None)):
@@ -368,6 +524,18 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
                     for p in drug_interaction_result["pairwise_interactions"]
                 ]
             }).execute()
+
+    # ── Email notifications (background, non-blocking) ──
+    if user_id:
+        user_record = supabase.auth.admin.get_user_by_id(user_id)
+        user_email = user_record.user.email if user_record and user_record.user else None
+        if user_email:
+            background_tasks.add_task(send_upload_email, user_email, file.filename, doc_type, insights)
+            if drug_interaction_result and (
+                drug_interaction_result.get("pairwise_interactions") or
+                drug_interaction_result.get("individual_warnings")
+            ):
+                background_tasks.add_task(send_drug_interaction_email, user_email, file.filename, drug_interaction_result)
 
     response_payload = {
         "doc_id": doc_id,
