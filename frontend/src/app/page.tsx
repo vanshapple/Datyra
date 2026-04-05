@@ -155,6 +155,10 @@ export default function Home() {
   const [showAuth, setShowAuth] = useState(false)
   const [user, setUser] = useState<any>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [chatMessages, setChatMessages] = useState<{role: 'user'|'assistant', text: string}[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Restore session on mount
@@ -175,7 +179,32 @@ export default function Home() {
     setResult(null)
     setFile(null)
     setVerifyResult(null)
+    setChatMessages([])
   }
+
+  const handleChat = async () => {
+    if (!chatInput.trim() || !result?.doc_id || chatLoading) return
+    const question = chatInput.trim()
+    setChatInput('')
+    setChatMessages(prev => [...prev, { role: 'user', text: question }])
+    setChatLoading(true)
+    try {
+      const res = await fetch(`https://datyra-production.up.railway.app/chat/${result.doc_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question })
+      })
+      const data = await res.json()
+      setChatMessages(prev => [...prev, { role: 'assistant', text: data.answer }])
+    } catch {
+      setChatMessages(prev => [...prev, { role: 'assistant', text: 'Chat failed. Please try again.' }])
+    }
+    setChatLoading(false)
+  }
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatMessages])
 
   const handleUpload = async () => {
     if (!file) return
@@ -319,7 +348,27 @@ export default function Home() {
         .verified-yes { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; font-family: 'DM Mono', monospace; background: rgba(29,158,117,0.15); color: #1D9E75; border: 1px solid rgba(29,158,117,0.3); }
         .verified-no { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; font-family: 'DM Mono', monospace; background: rgba(255,107,107,0.1); color: #FF6B6B; border: 1px solid rgba(255,107,107,0.2); }
 
-        /* ── Drug interactions ── */
+        /* ── Chat ── */
+        .chat-panel { border-radius: 16px; border: 1px solid rgba(99,102,241,0.25); background: rgba(99,102,241,0.03); margin-bottom: 12px; overflow: hidden; }
+        .chat-header { padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; gap: 10px; }
+        .chat-dot { width: 8px; height: 8px; border-radius: 50%; background: #6366f1; box-shadow: 0 0 8px #6366f1; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
+        .chat-title { font-size: 13px; font-weight: 700; color: #e8e6e0; }
+        .chat-sub { font-family: 'DM Mono', monospace; font-size: 10px; color: #6b6a75; margin-left: auto; }
+        .chat-messages { padding: 16px 20px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        .chat-messages::-webkit-scrollbar { width: 4px; }
+        .chat-messages::-webkit-scrollbar-track { background: transparent; }
+        .chat-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+        .msg-user { align-self: flex-end; background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.25); border-radius: 12px 12px 4px 12px; padding: 10px 14px; max-width: 80%; font-size: 13px; color: #e8e6e0; line-height: 1.5; }
+        .msg-assistant { align-self: flex-start; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07); border-radius: 12px 12px 12px 4px; padding: 10px 14px; max-width: 90%; font-size: 13px; color: #c4c2cc; line-height: 1.6; font-family: 'DM Mono', monospace; }
+        .chat-empty { text-align: center; padding: 24px; font-family: 'DM Mono', monospace; font-size: 12px; color: #3d3c47; }
+        .chat-input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.05); }
+        .chat-input { flex: 1; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; color: #e8e6e0; font-family: 'DM Mono', monospace; font-size: 12px; outline: none; transition: border-color 0.2s; }
+        .chat-input:focus { border-color: rgba(99,102,241,0.4); }
+        .chat-input::placeholder { color: #3d3c47; }
+        .chat-send { padding: 10px 16px; background: linear-gradient(135deg, #6366f1, #8b5cf6); border: none; border-radius: 10px; color: white; font-size: 14px; cursor: pointer; transition: all 0.2s; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        .chat-send:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(99,102,241,0.4); }
+        .chat-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
         .drug-card { border-radius: 16px; padding: 20px 24px; margin-bottom: 12px; border: 1px solid; }
         .severity-high { background: rgba(255,107,107,0.06); border-color: rgba(255,107,107,0.25); }
         .severity-medium { background: rgba(255,190,50,0.06); border-color: rgba(255,190,50,0.25); }
@@ -437,6 +486,46 @@ export default function Home() {
                 <div className="stat-label">MEDICINES FOUND</div>
               </div>
             </div>
+
+            {/* ── RAG Chat Panel ── */}
+            {result.doc_id && result.rag_chunks > 0 && (
+              <div className="chat-panel">
+                <div className="chat-header">
+                  <div className="chat-dot" />
+                  <span className="chat-title">Chat with this Document</span>
+                  <span className="chat-sub">{result.rag_chunks} chunks indexed</span>
+                </div>
+                <div className="chat-messages">
+                  {chatMessages.length === 0 && (
+                    <div className="chat-empty">Ask anything about this document...</div>
+                  )}
+                  {chatMessages.map((msg, i) => (
+                    <div key={i} className={msg.role === 'user' ? 'msg-user' : 'msg-assistant'}>
+                      {msg.text}
+                    </div>
+                  ))}
+                  {chatLoading && (
+                    <div className="msg-assistant" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="spinner-sm" /> Thinking...
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                <div className="chat-input-row">
+                  <input
+                    className="chat-input"
+                    placeholder="e.g. What medicines are mentioned? What are the key clauses?"
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleChat()}
+                    disabled={chatLoading}
+                  />
+                  <button className="chat-send" onClick={handleChat} disabled={chatLoading || !chatInput.trim()}>
+                    ↑
+                  </button>
+                </div>
+              </div>
+            )}
 
             {result.insights?.summary && (
               <div className="card">

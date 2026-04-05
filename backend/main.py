@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form , HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 import hashlib, os, tempfile, time, json, httpx
 from itertools import combinations
@@ -7,12 +8,15 @@ from PIL import Image
 import pytesseract
 import pdf2image
 import anthropic
+from pinecone import Pinecone
 
 load_dotenv()
 
 from supabase import create_client
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pinecone_index = pc.Index(os.getenv("PINECONE_INDEX", "datyra-docs"))
 
 app = FastAPI(title="Datyra API")
 
@@ -211,6 +215,89 @@ def classify_warning_severity(warnings: list[str]) -> str:
     return "LOW"
 
 # ─────────────────────────────────────────────
+# RAG — Chunking + Embedding + Chat
+# ─────────────────────────────────────────────
+
+EMBED_MODEL = "llama-text-embed-v2"
+CHUNK_SIZE = 400      # words per chunk
+CHUNK_OVERLAP = 50    # words overlap between chunks
+
+def chunk_text(text: str) -> list[str]:
+    """Split text into overlapping word-based chunks."""
+    words = text.split()
+    chunks = []
+    i = 0
+    while i < len(words):
+        chunk = " ".join(words[i:i + CHUNK_SIZE])
+        if chunk.strip():
+            chunks.append(chunk)
+        i += CHUNK_SIZE - CHUNK_OVERLAP
+    return chunks
+
+def embed_and_store(doc_id: str, text: str) -> int:
+    """
+    Chunk the document text, embed via Pinecone hosted inference,
+    and upsert into the index under namespace = doc_id.
+    Returns number of chunks stored.
+    """
+    chunks = chunk_text(text)
+    if not chunks:
+        return 0
+
+    embeddings = pc.inference.embed(
+        model=EMBED_MODEL,
+        inputs=chunks,
+        parameters={"input_type": "passage", "truncate": "END"}
+    )
+
+    vectors = [
+        {
+            "id": f"{doc_id}_chunk_{i}",
+            "values": emb["values"],
+            "metadata": {"text": chunk, "doc_id": doc_id, "chunk_index": i}
+        }
+        for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+    ]
+
+    pinecone_index.upsert(vectors=vectors, namespace=doc_id)
+    return len(vectors)
+
+def query_document(doc_id: str, question: str, top_k: int = 5) -> list[str]:
+    """Embed the question and retrieve top_k relevant chunks from this doc's namespace."""
+    q_embed = pc.inference.embed(
+        model=EMBED_MODEL,
+        inputs=[question],
+        parameters={"input_type": "query", "truncate": "END"}
+    )
+    results = pinecone_index.query(
+        namespace=doc_id,
+        vector=q_embed[0]["values"],
+        top_k=top_k,
+        include_metadata=True
+    )
+    return [match["metadata"]["text"] for match in results.get("matches", [])]
+
+def answer_with_rag(question: str, context_chunks: list[str], doc_type: str) -> str:
+    """Pass retrieved chunks as context to Claude and get a grounded answer."""
+    context = "\n\n---\n\n".join(context_chunks)
+    prompt = f"""You are a helpful assistant analyzing a {doc_type} document.
+Answer the user's question using ONLY the context below. If the answer is not in the context, say so clearly.
+
+CONTEXT:
+{context}
+
+QUESTION: {question}
+
+Give a clear, concise answer. For medical documents, always suggest consulting a qualified professional."""
+
+    response = claude.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text.strip()
+
+# ─────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────
 
@@ -242,7 +329,6 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(None
         "doc_type": doc_type,
         "hash": doc_hash,
         "storage_url": storage_url
-        "user id": user_id
     }).execute()
 
     doc_id = doc_record.data[0]["id"]
@@ -252,6 +338,14 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(None
         "summary": insights.get("summary", ""),
         "extracted_json": insights
     }).execute()
+
+    # ── Embed document text into Pinecone for RAG chat ──
+    chunk_count = 0
+    try:
+        if extracted_text and len(extracted_text.split()) > 20:
+            chunk_count = embed_and_store(doc_id, extracted_text)
+    except Exception as e:
+        print(f"RAG embedding failed (non-fatal): {e}")
 
     # ── Drug interaction check for MEDICAL documents ──
     drug_interaction_result = None
@@ -272,12 +366,14 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(None
             }).execute()
 
     response_payload = {
+        "doc_id": doc_id,
         "filename": file.filename,
         "hash": doc_hash,
         "doc_type": doc_type,
         "storage_url": storage_url,
         "insights": insights,
         "text_preview": extracted_text[:300],
+        "rag_chunks": chunk_count,
     }
     if drug_interaction_result:
         response_payload["drug_interactions"] = drug_interaction_result
@@ -298,6 +394,32 @@ async def get_interactions(doc_id: str):
     if not result.data:
         raise HTTPException(404, "No drug interaction data found for this document")
     return result.data[0]
+
+
+class ChatRequest(BaseModel):
+    question: str
+
+@app.post("/chat/{doc_id}")
+async def chat_with_document(doc_id: str, body: ChatRequest):
+    """RAG chat: embed question → retrieve chunks → Claude answers."""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(400, "Question cannot be empty")
+
+    # Fetch doc_type from Supabase for context-aware prompting
+    doc_record = supabase.table("documents").select("doc_type").eq("id", doc_id).execute()
+    doc_type = doc_record.data[0]["doc_type"] if doc_record.data else "GENERAL"
+
+    try:
+        chunks = query_document(doc_id, question)
+    except Exception as e:
+        raise HTTPException(500, f"Vector search failed: {e}")
+
+    if not chunks:
+        return {"answer": "I couldn't find relevant information in this document to answer your question.", "chunks_used": 0}
+
+    answer = answer_with_rag(question, chunks, doc_type)
+    return {"answer": answer, "chunks_used": len(chunks)}
 
 
 @app.get("/health")
